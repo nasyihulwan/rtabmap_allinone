@@ -275,7 +275,8 @@ except KeyboardInterrupt:
             # FIX: proximity detection lebih agresif
             'RGBD/ProximityBySpace':          'true',
             'RGBD/ProximityMaxGraphDepth':    '0',
-            'RGBD/ProximityPathMaxNeighbors': '5',   # naik dari 1
+            'RGBD/ProximityPathMaxNeighbors': '5',
+            'RGBD/NeighborLinkRefining': 'true',   # naik dari 1
             'RGBD/AngularUpdate':             '0.01',
             'RGBD/LinearUpdate':              '0.01',
 
@@ -296,14 +297,14 @@ except KeyboardInterrupt:
 
             # ICP
             'Reg/Strategy':                  '2',
-            'Reg/Force3DoF':                 'false',
+            'Reg/Force3DoF':                 'true',
             'Icp/MaxCorrespondenceDistance': '0.15',
             'Icp/PointToPlane':              'true',
             'Icp/Iterations':                '30',
             'Icp/VoxelSize':                 '0.1',
             'Icp/Epsilon':                   '0.001',
             'Icp/MaxTranslation':            '1.5',
-            'Icp/MaxRotation':               '0.5',
+            'Icp/MaxRotation':               '1',
             'Icp/OutlierRatio':              '0.1',
 
             # Rate
@@ -332,7 +333,7 @@ except KeyboardInterrupt:
             'subscribe_scan_cloud':     False,
             'subscribe_odom_info':      False,
             'approx_sync':              True,
-            'approx_sync_max_interval': 1.0,
+            'approx_sync_max_interval': 2.0,
             'sync_queue_size':          50,
             'topic_queue_size':         50,
             'frame_id':                 ROBOT_BASE_FRAME,
