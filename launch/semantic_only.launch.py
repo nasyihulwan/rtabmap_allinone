@@ -42,8 +42,8 @@ def generate_launch_description():
             '-p', ['confidence:=', confidence],
             '-p', ['device:=',     device],
             '-p', 'process_every_n:=3',
-            '-p', 'iou_threshold:=0.3',
-            '-p', 'max_track_age:=10',
+            '-p', 'iou_threshold:=0.15',  # toleran untuk skip-frame
+            '-p', 'max_track_age:=30',   # track bertahan lebih lama
             '-p', 'use_sim_time:=true',
         ],
         output='screen', name='yolo_detector'
