@@ -15,6 +15,10 @@
 #   /camera/depth/image_rect_raw  ← decompress_depth
 #   /camera/color/camera_info     ← relay_color_info
 #   /map                          ← RTABMap
+#
+# Parameter Map-level IoU (semantic_grid_node):
+#   map_iou_threshold  — minimum IoU untuk dianggap objek sama (default: 0.1)
+#   min_cells_to_check — minimum cell sebelum instance dievaluasi (default: 20)
 # ═══════════════════════════════════════════════════════════════════════
 
 import os
@@ -25,24 +29,33 @@ from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
 
-    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
+    script_dir   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     semantic_dir = os.path.join(script_dir, 'semantic')
     model_default = os.path.join(script_dir, 'models', 'yolov8n-seg_coco.pt')
 
-    # ── Argumen (diteruskan ke script via env var / ROS param override) ──
+    # ── Argumen YOLO ──────────────────────────────────────────────────────
     model_path_arg = DeclareLaunchArgument(
         'model_path', default_value=model_default)
     device_arg     = DeclareLaunchArgument('device',     default_value='cpu')
     confidence_arg = DeclareLaunchArgument('confidence', default_value='0.5')
 
-    model_path = LaunchConfiguration('model_path')
-    device     = LaunchConfiguration('device')
-    confidence = LaunchConfiguration('confidence')
+    # ── Argumen Map-level IoU ─────────────────────────────────────────────
+    iou_threshold_arg = DeclareLaunchArgument(
+        'map_iou_threshold',
+        default_value='0.1',
+        description='Minimum IoU antar footprint cell untuk dianggap objek sama')
+    min_cells_arg = DeclareLaunchArgument(
+        'min_cells_to_check',
+        default_value='20',
+        description='Minimum cell yang harus terakumulasi sebelum instance dievaluasi')
+
+    model_path    = LaunchConfiguration('model_path')
+    device        = LaunchConfiguration('device')
+    confidence    = LaunchConfiguration('confidence')
+    iou_threshold = LaunchConfiguration('map_iou_threshold')
+    min_cells     = LaunchConfiguration('min_cells_to_check')
 
     # ── Node 1: YOLO Detector ─────────────────────────────────────────────
-    # Konfigurasi diteruskan via ROS2 parameter syntax (--ros-args -p)
-    # agar kompatibel dengan script yang pakai rclpy + node.declare_parameter
     yolo_detector = ExecuteProcess(
         cmd=[
             'python3', os.path.join(semantic_dir, 'yolo_detector.py'),
@@ -76,6 +89,8 @@ def generate_launch_description():
                 cmd=[
                     'python3', os.path.join(semantic_dir, 'semantic_grid_node.py'),
                     '--ros-args',
+                    '-p', ['map_iou_threshold:=', iou_threshold],
+                    '-p', ['min_cells_to_check:=', min_cells],
                 ],
                 output='screen',
             )
@@ -86,6 +101,8 @@ def generate_launch_description():
         model_path_arg,
         device_arg,
         confidence_arg,
+        iou_threshold_arg,
+        min_cells_arg,
         yolo_detector,
         semantic_projector,
         semantic_grid,
