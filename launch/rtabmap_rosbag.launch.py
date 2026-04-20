@@ -1,26 +1,24 @@
 """
-ALL-IN-ONE Launch File — Fixed v10
-Rosbag: rosbag2_2026_04_10-03_17_38
+ALL-IN-ONE Launch File — Fixed v10 + bag baru 2026-04-15
 
-FIXES v10:
-1. decompress_color: bytes() bukan flatten().tolist() → 10x lebih cepat
-   → sync tidak drop saat robot putar
-2. Vis/FeatureType = '6' → samakan dengan Kp/DetectorStrategy
-3. Loop closure tuning untuk koridor repetitif:
-   - Vis/MinInliers: 15 → 10
-   - Kp/MaxFeatures: 400 → 600
-   - RGBD/ProximityPathMaxNeighbors: 1 → 5
-4. ICP odometry dari LiDAR sebagai alternatif wheel odom
-   (aktif bersamaan, rtabmap pakai odom_topic dari arg)
+Perubahan dari v10 original (bag lama):
+  1. bag_path default → bag baru 2026-04-15
+  2. use_ekf default → false  (odom/filtered sudah ada di bag baru)
+  3. odom_topic default → /a200_1060/platform/odom/filtered
+  4. decompress_depth → pakai decompress_depth_node.py (fix Humble compressedDepth bug)
+     sekaligus relay camera_info depth + color di dalamnya
+  5. relay_camera_info → hapus (sudah dihandle decompress_depth_node.py)
+
+SEMUA YANG LAIN IDENTIK dengan v10 yang sudah terbukti jalan.
 """
 
 from launch import LaunchDescription
-from launch.actions import ( # type: ignore
+from launch.actions import (
     DeclareLaunchArgument, ExecuteProcess, TimerAction, LogInfo
 )
-from launch.conditions import IfCondition # type: ignore
-from launch.substitutions import LaunchConfiguration  # type: ignore
-from launch_ros.actions import Node # type: ignore
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 ROBOT_BASE_FRAME = 'a200_1060/base_link'
 ODOM_FRAME       = 'odom'
@@ -36,16 +34,18 @@ def generate_launch_description():
     use_ekf     = LaunchConfiguration('use_ekf')
     odom_topic  = LaunchConfiguration('odom_topic')
 
+    # ── Argumen — hanya 3 default yang berubah dari v10 ──────────────────
     declare_bag_path   = DeclareLaunchArgument(
-        'bag_path', default_value='/root/ws/rosbag2_2026_04_10-03_17_38')
+        'bag_path',
+        default_value='/root/ws/project/rosbag_launch/bags/rosbag2_2026_04_15-08_39_23')
     declare_rate       = DeclareLaunchArgument('rate',    default_value='0.5')
     declare_rviz       = DeclareLaunchArgument('rviz',    default_value='true')
     declare_db_path    = DeclareLaunchArgument('db_path', default_value='/root/.ros/rtabmap.db')
     declare_use_ekf    = DeclareLaunchArgument(
-        'use_ekf', default_value='true',
-        description='true=EKF wheel+IMU | false=pakai odom_topic langsung')
+        'use_ekf', default_value='false',
+        description='false=pakai odom/filtered dari bag | true=EKF live')
     declare_odom_topic = DeclareLaunchArgument(
-        'odom_topic', default_value='/odometry/filtered',
+        'odom_topic', default_value='/a200_1060/platform/odom/filtered',
         description='Topic odom ke RTAB-Map')
 
     # ═══════════════════════════════════════════
@@ -60,7 +60,7 @@ def generate_launch_description():
         output='screen', name='rosbag_play')
 
     # ═══════════════════════════════════════════
-    # T+2s — RELAY
+    # T+2s — RELAY TF (penting! bag pakai namespace a200_1060)
     # ═══════════════════════════════════════════
     relay_tf = Node(
         package='topic_tools', executable='relay', name='relay_tf',
@@ -77,14 +77,6 @@ def generate_launch_description():
         arguments=['/a200_1060/platform/odom', '/odom'],
         parameters=[{'use_sim_time': True}], output='screen')
 
-    relay_camera_info = Node(
-        package='topic_tools', executable='relay', name='relay_camera_info',
-        arguments=[
-            '/camera/camera/color/camera_info',
-            '/camera/color/camera_info',
-        ],
-        parameters=[{'use_sim_time': True}], output='screen')
-
     relay_imu = Node(
         package='topic_tools', executable='relay', name='relay_imu',
         arguments=['/a200_1060/sensors/imu_0/data', '/imu/data'],
@@ -93,7 +85,7 @@ def generate_launch_description():
         output='screen')
 
     # ═══════════════════════════════════════════
-    # T+2s — STATIC TF
+    # T+2s — STATIC TF (kamera ke base_link)
     # ═══════════════════════════════════════════
     tf_base_camera = Node(
         package='tf2_ros', executable='static_transform_publisher',
@@ -125,9 +117,9 @@ def generate_launch_description():
 
     # ═══════════════════════════════════════════
     # T+2s — IMAGE DECOMPRESS
-    # FIX v10: bytes() bukan flatten().tolist()
-    # 10x lebih cepat → CPU tidak overload saat robot putar
     # ═══════════════════════════════════════════
+
+    # Color: inline script (identik v10, terbukti jalan)
     decompress_color = ExecuteProcess(
         cmd=['python3', '-c', """
 import rclpy
@@ -159,7 +151,6 @@ class ColorDecompress(Node):
             out.encoding = 'rgb8'
             out.is_bigendian = 0
             out.step = int(out.width * 3)
-            # FIX: bytes() jauh lebih cepat dari flatten().tolist()
             out.data = bytes(img_rgb)
             self.pub.publish(out)
             self.count += 1
@@ -176,13 +167,17 @@ except KeyboardInterrupt:
 """],
         output='screen', name='decompress_color')
 
+    # Depth: pakai node Python kustom (fix Humble compressedDepth bug)
+    # decompress_depth_node.py juga sekaligus relay camera_info color + depth
+    import os
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     decompress_depth = ExecuteProcess(
         cmd=['python3',
-             '/root/ws/project/rtabmap_allinone/decompress_depth_fix.py'],
+             os.path.join(script_dir, 'decompress_depth_node.py')],
         output='screen', name='decompress_depth')
 
     # ═══════════════════════════════════════════
-    # T+3s — EKF NODE (kondisional)
+    # T+3s — EKF NODE (kondisional, false untuk bag baru)
     # ═══════════════════════════════════════════
     ekf_node = Node(
         package='robot_localization',
@@ -226,8 +221,7 @@ except KeyboardInterrupt:
         }])
 
     # ═══════════════════════════════════════════
-    # T+5s — RTAB-MAP SLAM
-    # FIX v10: parameter loop closure untuk koridor
+    # T+6s — RTAB-MAP SLAM (identik v10)
     # ═══════════════════════════════════════════
     rtabmap = Node(
         package='rtabmap_slam', executable='rtabmap', name='rtabmap',
@@ -247,40 +241,33 @@ except KeyboardInterrupt:
             'sync_queue_size':          50,
             'topic_queue_size':         50,
 
-            # Memory
             'Mem/STMSize':             '30',
             'Mem/RehearsalSimilarity': '0.45',
             'Mem/NotLinkedNodesKept':  'false',
             'Mem/IncrementalMemory':   'true',
             'Mem/InitWMWithAllNodes':  'false',
 
-            # FIX: samakan detector strategy
-            'Kp/DetectorStrategy': '6',    # ORB
-            'Vis/FeatureType':     '6',    # ORB — harus sama!
-            'Kp/MaxFeatures':      '600',  # naik dari 400 → lebih banyak fitur di koridor
-
-            # FIX: turunkan threshold untuk koridor repetitif
-            'Vis/MinInliers':      '10',   # turun dari 15 → lebih toleran
+            'Kp/DetectorStrategy': '6',
+            'Vis/FeatureType':     '6',
+            'Kp/MaxFeatures':      '600',
+            'Vis/MinInliers':      '10',
             'Vis/InlierDistance':  '0.1',
             'Vis/EstimationType':  '1',
             'Vis/MaxDepth':        '10.0',
 
-            # Optimizer
             'RGBD/OptimizeFromGraphEnd': 'false',
             'RGBD/OptimizeMaxError':     '3.0',
             'Optimizer/Strategy':        '1',
             'Optimizer/Iterations':      '20',
             'Optimizer/Robust':          'true',
 
-            # FIX: proximity detection lebih agresif
             'RGBD/ProximityBySpace':          'true',
             'RGBD/ProximityMaxGraphDepth':    '0',
             'RGBD/ProximityPathMaxNeighbors': '5',
-            'RGBD/NeighborLinkRefining': 'true',   # naik dari 1
+            'RGBD/NeighborLinkRefining':      'true',
             'RGBD/AngularUpdate':             '0.01',
             'RGBD/LinearUpdate':              '0.01',
 
-            # 2D Grid
             'RGBD/CreateOccupancyGrid': 'true',
             'Grid/Sensor':              '2',
             'Grid/3D':                  'false',
@@ -295,7 +282,6 @@ except KeyboardInterrupt:
             'Grid/GroundIsObstacle':    'false',
             'Grid/NormalsSegmentation': 'true',
 
-            # ICP
             'Reg/Strategy':                  '2',
             'Reg/Force3DoF':                 'true',
             'Icp/MaxCorrespondenceDistance': '0.15',
@@ -307,7 +293,6 @@ except KeyboardInterrupt:
             'Icp/MaxRotation':               '1',
             'Icp/OutlierRatio':              '0.1',
 
-            # Rate
             'Rtabmap/DetectionRate': '1.0',
             'Rtabmap/TimeThr':       '0',
             'Rtabmap/MemoryThr':     '0',
@@ -360,16 +345,15 @@ except KeyboardInterrupt:
         rosbag_play,
 
         TimerAction(period=2.0, actions=[
-            LogInfo(msg='>>> [T+2s] Relay + TF + decompress...'),
-            relay_tf, relay_tf_static, relay_odom, relay_camera_info,
-            relay_imu,
+            LogInfo(msg='>>> [T+2s] Relay TF + Static TF + Decompress...'),
+            relay_tf, relay_tf_static, relay_odom, relay_imu,
             tf_base_camera, tf_camera_color_optical,
             tf_camera_depth_optical, tf_bridge_base,
             decompress_color, decompress_depth,
         ]),
 
         TimerAction(period=3.0, actions=[
-            LogInfo(msg='>>> [T+3s] EKF filter (if use_ekf=true)...'),
+            LogInfo(msg='>>> [T+3s] EKF filter (jika use_ekf=true)...'),
             ekf_node,
         ]),
 
