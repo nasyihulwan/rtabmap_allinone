@@ -14,7 +14,7 @@ SEMUA YANG LAIN IDENTIK dengan v10 yang sudah terbukti jalan.
 
 from launch import LaunchDescription
 from launch.actions import (
-    DeclareLaunchArgument, ExecuteProcess, TimerAction, LogInfo
+    DeclareLaunchArgument, ExecuteProcess, TimerAction, LogInfo, OpaqueFunction
 )
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
@@ -27,12 +27,13 @@ MAP_FRAME        = 'map'
 
 def generate_launch_description():
 
-    bag_path    = LaunchConfiguration('bag_path')
-    rate        = LaunchConfiguration('rate')
-    rviz        = LaunchConfiguration('rviz')
-    db_path     = LaunchConfiguration('db_path')
-    use_ekf     = LaunchConfiguration('use_ekf')
-    odom_topic  = LaunchConfiguration('odom_topic')
+    bag_path     = LaunchConfiguration('bag_path')
+    rate         = LaunchConfiguration('rate')
+    rviz         = LaunchConfiguration('rviz')
+    db_path      = LaunchConfiguration('db_path')
+    use_ekf      = LaunchConfiguration('use_ekf')
+    odom_topic   = LaunchConfiguration('odom_topic')
+    localization = LaunchConfiguration('localization')
 
     # ── Argumen — hanya 3 default yang berubah dari v10 ──────────────────
     declare_bag_path   = DeclareLaunchArgument(
@@ -47,6 +48,9 @@ def generate_launch_description():
     declare_odom_topic = DeclareLaunchArgument(
         'odom_topic', default_value='/a200_1060/platform/odom/filtered',
         description='Topic odom ke RTAB-Map')
+    declare_localization = DeclareLaunchArgument(
+        'localization', default_value='false',
+        description='true = localization mode (pakai peta existing) | false = mapping mode')
 
     # ═══════════════════════════════════════════
     # T+0s — ROSBAG
@@ -221,125 +225,149 @@ except KeyboardInterrupt:
         }])
 
     # ═══════════════════════════════════════════
-    # T+6s — RTAB-MAP SLAM (identik v10)
+    # T+6s — RTAB-MAP (via OpaqueFunction)
+    # OpaqueFunction dipakai agar Mem/IncrementalMemory bisa dikontrol
+    # sebagai string 'true'/'false' berdasarkan arg localization,
+    # tanpa PythonExpression yang salah tipe di ROS2 Humble.
     # ═══════════════════════════════════════════
-    rtabmap = Node(
-        package='rtabmap_slam', executable='rtabmap', name='rtabmap',
-        output='screen',
-        parameters=[{
-            'use_sim_time':         True,
-            'database_path':        db_path,
-            'frame_id':             ROBOT_BASE_FRAME,
-            'map_frame_id':         MAP_FRAME,
-            'odom_frame_id':        ODOM_FRAME,
-            'subscribe_depth':      True,
-            'subscribe_rgb':        True,
-            'subscribe_scan_cloud': True,
-            'subscribe_odom_info':  False,
-            'approx_sync':              True,
-            'approx_sync_max_interval': 1.0,
-            'sync_queue_size':          50,
-            'topic_queue_size':         50,
+    def launch_rtabmap(context, *args, **kwargs):
+        loc        = context.launch_configurations.get('localization', 'false')
+        db         = context.launch_configurations.get('db_path', '/root/.ros/rtabmap.db')
+        odom       = context.launch_configurations.get('odom_topic',
+                         '/a200_1060/platform/odom/filtered')
+        rviz_flag  = context.launch_configurations.get('rviz', 'true')
+        incremental = 'false' if loc == 'true' else 'true'
 
-            'Mem/STMSize':             '30',
-            'Mem/RehearsalSimilarity': '0.45',
-            'Mem/NotLinkedNodesKept':  'false',
-            'Mem/IncrementalMemory':   'true',
-            'Mem/InitWMWithAllNodes':  'false',
+        rtabmap_node = Node(
+            package='rtabmap_slam', executable='rtabmap', name='rtabmap',
+            output='screen',
+            parameters=[{
+                'use_sim_time':         True,
+                'database_path':        db,
+                'frame_id':             ROBOT_BASE_FRAME,
+                'map_frame_id':         MAP_FRAME,
+                'odom_frame_id':        ODOM_FRAME,
+                'subscribe_depth':      True,
+                'subscribe_rgb':        True,
+                'subscribe_scan_cloud': True,
+                'subscribe_odom_info':  False,
+                'approx_sync':              True,
+                'approx_sync_max_interval': 1.0,
+                'sync_queue_size':          50,
+                'topic_queue_size':         50,
 
-            'Kp/DetectorStrategy': '6',
-            'Vis/FeatureType':     '6',
-            'Kp/MaxFeatures':      '600',
-            'Vis/MinInliers':      '10',
-            'Vis/InlierDistance':  '0.1',
-            'Vis/EstimationType':  '1',
-            'Vis/MaxDepth':        '10.0',
+                'Mem/STMSize':             '30',
+                'Mem/RehearsalSimilarity': '0.45',
+                'Mem/NotLinkedNodesKept':  'false',
+                'Mem/IncrementalMemory':   incremental,
+                'Mem/InitWMWithAllNodes':  'false',
 
-            'RGBD/OptimizeFromGraphEnd': 'false',
-            'RGBD/OptimizeMaxError':     '3.0',
-            'Optimizer/Strategy':        '1',
-            'Optimizer/Iterations':      '20',
-            'Optimizer/Robust':          'true',
+                'Kp/DetectorStrategy': '6',
+                'Vis/FeatureType':     '6',
+                'Kp/MaxFeatures':      '600',
+                'Vis/MinInliers':      '10',
+                'Vis/InlierDistance':  '0.1',
+                'Vis/EstimationType':  '1',
+                'Vis/MaxDepth':        '10.0',
 
-            'RGBD/ProximityBySpace':          'true',
-            'RGBD/ProximityMaxGraphDepth':    '0',
-            'RGBD/ProximityPathMaxNeighbors': '5',
-            'RGBD/NeighborLinkRefining':      'true',
-            'RGBD/AngularUpdate':             '0.01',
-            'RGBD/LinearUpdate':              '0.01',
+                'RGBD/OptimizeFromGraphEnd': 'false',
+                'RGBD/OptimizeMaxError':     '4.0',
+                'Optimizer/Strategy':        '1',
+                'Optimizer/Iterations':      '20',
+                'Optimizer/Robust':          'true',
 
-            'RGBD/CreateOccupancyGrid': 'true',
-            'Grid/Sensor':              '2',
-            'Grid/3D':                  'false',
-            'Grid/MaxObstacleHeight':   '2.0',
-            'Grid/MinGroundHeight':     '-0.1',
-            'Grid/MaxGroundHeight':     '0.1',
-            'Grid/RayTracing':          'true',
-            'Grid/FootprintLength':     '0.8',
-            'Grid/FootprintWidth':      '0.5',
-            'Grid/FootprintHeight':     '0.5',
-            'Grid/ClusterRadius':       '0.1',
-            'Grid/GroundIsObstacle':    'false',
-            'Grid/NormalsSegmentation': 'true',
+                'RGBD/ProximityBySpace':          'true',
+                'RGBD/ProximityMaxGraphDepth':    '0',
+                'RGBD/ProximityPathMaxNeighbors': '5',
+                'RGBD/NeighborLinkRefining':      'true',
+                'RGBD/AngularUpdate':             '0.01',
+                'RGBD/LinearUpdate':              '0.01',
 
-            'Reg/Strategy':                  '2',
-            'Reg/Force3DoF':                 'true',
-            'Icp/MaxCorrespondenceDistance': '0.15',
-            'Icp/PointToPlane':              'true',
-            'Icp/Iterations':                '30',
-            'Icp/VoxelSize':                 '0.1',
-            'Icp/Epsilon':                   '0.001',
-            'Icp/MaxTranslation':            '1.5',
-            'Icp/MaxRotation':               '1',
-            'Icp/OutlierRatio':              '0.1',
+                'RGBD/CreateOccupancyGrid': 'true',
+                'Grid/Sensor':              '2',
+                'Grid/3D':                  'false',
+                'Grid/MaxObstacleHeight':   '2.0',
+                'Grid/MinGroundHeight':     '-0.1',
+                'Grid/MaxGroundHeight':     '0.1',
+                'Grid/RayTracing':          'true',
+                'Grid/FootprintLength':     '0.8',
+                'Grid/FootprintWidth':      '0.5',
+                'Grid/FootprintHeight':     '0.5',
+                'Grid/ClusterRadius':       '0.1',
+                'Grid/GroundIsObstacle':    'false',
+                'Grid/NormalsSegmentation': 'true',
 
-            'Rtabmap/DetectionRate': '1.0',
-            'Rtabmap/TimeThr':       '0',
-            'Rtabmap/MemoryThr':     '0',
-        }],
-        remappings=[
-            ('rgb/image',       '/camera/color/image_raw'),
-            ('rgb/camera_info', '/camera/color/camera_info'),
-            ('depth/image',     '/camera/depth/image_rect_raw'),
-            ('scan_cloud',      '/velodyne_points'),
-            ('odom',            odom_topic),
-            ('map',             '/map'),
-            ('cloud_map',       '/rtabmap/cloud_map'),
-            ('grid_map',        '/rtabmap/grid_map'),
-        ])
+                'Reg/Strategy':                  '2',
+                'Reg/Force3DoF':                 'true',
+                'Icp/MaxCorrespondenceDistance': '0.15',
+                'Icp/PointToPlane':              'true',
+                'Icp/Iterations':                '30',
+                'Icp/VoxelSize':                 '0.1',
+                'Icp/Epsilon':                   '0.001',
+                'Icp/MaxTranslation':            '1.5',
+                'Icp/MaxRotation':               '1',
+                'Icp/OutlierRatio':              '0.1',
 
-    rtabmap_viz = Node(
-        package='rtabmap_viz', executable='rtabmap_viz', name='rtabmap_viz',
-        output='screen',
-        parameters=[{
-            'use_sim_time':             True,
-            'subscribe_depth':          True,
-            'subscribe_rgb':            True,
-            'subscribe_scan_cloud':     False,
-            'subscribe_odom_info':      False,
-            'approx_sync':              True,
-            'approx_sync_max_interval': 2.0,
-            'sync_queue_size':          50,
-            'topic_queue_size':         50,
-            'frame_id':                 ROBOT_BASE_FRAME,
-            'odom_frame_id':            ODOM_FRAME,
-        }],
-        remappings=[
-            ('rgb/image',       '/camera/color/image_raw'),
-            ('rgb/camera_info', '/camera/color/camera_info'),
-            ('depth/image',     '/camera/depth/image_rect_raw'),
-            ('odom',            odom_topic),
-        ])
+                'Rtabmap/DetectionRate': '1.0',
+                'Rtabmap/TimeThr':       '0',
+                'Rtabmap/MemoryThr':     '0',
+            }],
+            remappings=[
+                ('rgb/image',       '/camera/color/image_raw'),
+                ('rgb/camera_info', '/camera/color/camera_info'),
+                ('depth/image',     '/camera/depth/image_rect_raw'),
+                ('scan_cloud',      '/velodyne_points'),
+                ('odom',            odom),
+                ('map',             '/map'),
+                ('cloud_map',       '/rtabmap/cloud_map'),
+                ('grid_map',        '/rtabmap/grid_map'),
+            ])
 
-    rviz_node = Node(
-        package='rviz2', executable='rviz2', name='rviz2',
-        parameters=[{'use_sim_time': True}],
-        condition=IfCondition(rviz),
-        output='screen')
+        rtabmap_viz_node = Node(
+            package='rtabmap_viz', executable='rtabmap_viz', name='rtabmap_viz',
+            output='screen',
+            parameters=[{
+                'use_sim_time':             True,
+                'subscribe_depth':          True,
+                'subscribe_rgb':            True,
+                'subscribe_scan_cloud':     False,
+                'subscribe_odom_info':      False,
+                'approx_sync':              True,
+                'approx_sync_max_interval': 2.0,
+                'sync_queue_size':          50,
+                'topic_queue_size':         50,
+                'frame_id':                 ROBOT_BASE_FRAME,
+                'odom_frame_id':            ODOM_FRAME,
+            }],
+            remappings=[
+                ('rgb/image',       '/camera/color/image_raw'),
+                ('rgb/camera_info', '/camera/color/camera_info'),
+                ('depth/image',     '/camera/depth/image_rect_raw'),
+                ('odom',            odom),
+            ])
+
+        rviz_node = Node(
+            package='rviz2', executable='rviz2', name='rviz2',
+            parameters=[{'use_sim_time': True}],
+            condition=IfCondition(rviz_flag),
+            output='screen')
+
+        mode_str = 'LOCALIZATION' if loc == 'true' else 'MAPPING'
+        return [
+            LogInfo(msg=f'>>> [T+6s] RTAB-Map {mode_str} mode '
+                        f'(Mem/IncrementalMemory={incremental})...'),
+            rtabmap_node,
+            rtabmap_viz_node,
+            TimerAction(period=2.0, actions=[
+                LogInfo(msg='>>> [T+8s] RViz2...'),
+                rviz_node,
+            ]),
+        ]
 
     return LaunchDescription([
         declare_bag_path, declare_rate, declare_rviz,
         declare_db_path, declare_use_ekf, declare_odom_topic,
+        declare_localization,
 
         LogInfo(msg='>>> [T+0s] Rosbag play...'),
         rosbag_play,
@@ -358,12 +386,6 @@ except KeyboardInterrupt:
         ]),
 
         TimerAction(period=6.0, actions=[
-            LogInfo(msg='>>> [T+6s] RTAB-Map SLAM...'),
-            rtabmap, rtabmap_viz,
-        ]),
-
-        TimerAction(period=8.0, actions=[
-            LogInfo(msg='>>> [T+8s] RViz2...'),
-            rviz_node,
+            OpaqueFunction(function=launch_rtabmap),
         ]),
     ])
