@@ -1,140 +1,282 @@
 #!/bin/bash
-
-# ═══════════════════════════════════════════════════════════════
-# RTAB-Map All-in-One Run Script — Modular
-#
-# Usage:
-#   ./run.sh [rate] [mode] [use_ekf] [odom_topic]
-#
-# Contoh:
-#   ./run.sh                    → rate 0.5, bag baru, odom filtered dari bag
-#   ./run.sh 0.3                → rate 0.3
-#   ./run.sh 0.5 localize       → localization mode
-#   ./run.sh setup              → setup OS buffer
-#   ./run.sh diagnose           → cek sistem
-#
-# CATATAN BAG BARU (2026-04-15):
-#   /a200_1060/platform/odom/filtered sudah ada di bag → use_ekf=false
-#   Image sudah compressed → decompress node otomatis dijalankan
-# ═══════════════════════════════════════════════════════════════
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  run.sh — RTABMap Live Mode (AGX Orin)                         ║
+# ║                                                                  ║
+# ║  Usage:                                                          ║
+# ║    ./run.sh              live mode, mapping + semantic           ║
+# ║    ./run.sh output       live + capture visualisasi             ║
+# ║    ./run.sh localize     live mode, localization                ║
+# ║    ./run.sh diagnose     pre-check + tests, tanpa launch        ║
+# ╚══════════════════════════════════════════════════════════════════╝
 
 CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-RED='\033[0;31m'; BLUE='\033[0;34m'; NC='\033[0m'
+RED='\033[0;31m'; BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ── [UBAH DI SINI] Path bag baru ─────────────────────────────────
-BAG_PATH="/root/ws/project/rosbag_launch/bags/rosbag2_2026_04_15-08_39_23"
+# ── Konfigurasi ───────────────────────────────────────────────────
+ROS_WS="/home/kmp-orin/ros2_ws"
+DB_PATH="/home/kmp-orin/.ros/rtabmap.db"
+ENGINE_PATH="$SCRIPT_DIR/models/best_brin_yolo11s_v1.engine"
+PT_PATH="$SCRIPT_DIR/models/best_brin_yolo11s_v1.pt"
+ODOM_TOPIC="/a200_1060/platform/odom/filtered"
+HZ_SAMPLE_SECS=3
 
-# ── Default: bag baru sudah ada odom/filtered, EKF tidak perlu live
-RATE="${1:-0.5}"
-MODE="${2:-mapping}"
-USE_EKF="${3:-false}"
-ODOM_TOPIC="${4:-/a200_1060/platform/odom/filtered}"
+# ── Parse argumen ─────────────────────────────────────────────────
+ARG="${1:-}"   # output | localize | diagnose | help | (kosong = mapping)
 
 print_banner() {
-    echo -e "${BLUE}"
+    local label="$1"
+    echo -e "${BLUE}${BOLD}"
     echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║   RTAB-Map All-in-One — Modular          ║"
-    echo "  ║   VLP-32C + D455 | Rosbag Replay         ║"
-    echo "  ║   Bag: 2026-04-15 (dengan EKF filtered)  ║"
+    echo "  ║   RTABMap Live Mode — AGX Orin           ║"
+    echo "  ║   VLP-32C + D455 | $label"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${NC}"
 }
 
-setup() {
-    echo -e "${YELLOW}→ Setup OS network buffer...${NC}"
-    sudo sysctl -w net.core.rmem_max=33554432    2>/dev/null || true
-    sudo sysctl -w net.core.rmem_default=33554432 2>/dev/null || true
-    export FASTRTPS_DEFAULT_PROFILES_FILE="$SCRIPT_DIR/config/fastdds_rtabmap.xml"
-    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-    export FASTDDS_STATISTICS=0
-    echo -e "${GREEN}✓ Setup selesai${NC}"
+# ══════════════════════════════════════════════════════════════════
+# PRE-CHECK
+# ══════════════════════════════════════════════════════════════════
+precheck() {
+    local fail=0
+
+    echo -e "${CYAN}${BOLD}=== Pre-check ===\n${NC}"
+
+    # ROS workspace
+    if [ ! -f "$ROS_WS/install/setup.bash" ]; then
+        echo -e "  ${RED}✗ ROS workspace tidak ditemukan: $ROS_WS${NC}"
+        echo -e "  ${YELLOW}  Sesuaikan ROS_WS di script${NC}"
+        fail=1
+    else
+        echo -e "  ${GREEN}✓ ROS workspace: $ROS_WS${NC}"
+    fi
+
+    # Model YOLO
+    if [ -f "$ENGINE_PATH" ]; then
+        MODEL_PATH="$ENGINE_PATH"
+        echo -e "  ${GREEN}✓ Model: $(basename $ENGINE_PATH) (TRT engine)${NC}"
+    elif [ -f "$PT_PATH" ]; then
+        MODEL_PATH="$PT_PATH"
+        echo -e "  ${YELLOW}⚠ Model: $(basename $PT_PATH) (fallback .pt — lebih lambat)${NC}"
+    else
+        echo -e "  ${RED}✗ Model tidak ditemukan di $SCRIPT_DIR/models/${NC}"
+        echo -e "  ${YELLOW}  Diharapkan: best_brin_yolo11s_v1.engine atau .pt${NC}"
+        fail=1
+    fi
+    export MODEL_PATH
+
+    # Semantic files
+    local sem_ok=1
+    for f in \
+        "$SCRIPT_DIR/semantic/yolo_detector.py" \
+        "$SCRIPT_DIR/semantic/semantic_projector.py" \
+        "$SCRIPT_DIR/semantic/semantic_grid_node.py" \
+        "$SCRIPT_DIR/decompress_depth_fix.py"; do
+        [ ! -f "$f" ] && \
+            echo -e "  ${RED}✗ $(basename $f) tidak ditemukan${NC}" && \
+            sem_ok=0 && fail=1
+    done
+    [ "$sem_ok" = "1" ] && echo -e "  ${GREEN}✓ Semantic files OK${NC}"
+
+    # ROS packages
+    source /opt/ros/humble/setup.bash 2>/dev/null
+    [ -f "$ROS_WS/install/setup.bash" ] && source "$ROS_WS/install/setup.bash" 2>/dev/null
+    local pkg_ok=1
+    for pkg in rtabmap_slam rtabmap_odom rtabmap_viz topic_tools \
+               robot_localization rviz2; do
+        if ! ros2 pkg list 2>/dev/null | grep -q "^${pkg}$"; then
+            echo -e "  ${RED}✗ ROS pkg: $pkg${NC}"
+            pkg_ok=0; fail=1
+        fi
+    done
+    [ "$pkg_ok" = "1" ] && echo -e "  ${GREEN}✓ ROS packages OK${NC}"
+
+    # Sensor topics + Hz
+    echo -e "\n  ${CYAN}Sensor topics (sampling ${HZ_SAMPLE_SECS}s)...${NC}"
+    local topics_ok=1
+
+    check_topic_hz() {
+        local topic="$1"
+        local min_hz="$2"
+        local buf
+        buf=$(timeout $((HZ_SAMPLE_SECS + 1)) \
+              ros2 topic hz "$topic" --window 10 2>/dev/null || true)
+        local avg
+        avg=$(echo "$buf" | grep -oP 'average rate: \K[0-9.]+' | tail -1)
+        if [ -z "$avg" ]; then
+            echo -e "    ${YELLOW}? $topic (tidak muncul)${NC}"
+            topics_ok=0
+            return
+        fi
+        local ok
+        ok=$(echo "$avg $min_hz" | awk '{print ($1 >= $2) ? "1" : "0"}')
+        if [ "$ok" = "1" ]; then
+            echo -e "    ${GREEN}✓ $topic @ ${avg} Hz (target ≥ ${min_hz})${NC}"
+        else
+            echo -e "    ${RED}✗ $topic @ ${avg} Hz (target ≥ ${min_hz})${NC}"
+            topics_ok=0
+        fi
+    }
+
+    check_topic_hz "/velodyne_points"                       10
+    check_topic_hz "/camera/camera/color/image_raw"         15
+    check_topic_hz "/camera/camera/depth/image_rect_raw"    15
+    if ros2 topic list 2>/dev/null | grep -q "^/a200_1060/platform/odom/filtered$"; then
+        check_topic_hz "/a200_1060/platform/odom/filtered"  50
+    else
+        check_topic_hz "/odom"                              50
+    fi
+    [ "$topics_ok" = "0" ] && fail=1
+
+    echo ""
+    return $fail
 }
 
-diagnose() {
-    echo -e "\n${CYAN}Cek package...${NC}"
-    for pkg in rtabmap_slam rtabmap_odom rtabmap_viz topic_tools \
-               image_transport image_transport_plugins robot_localization; do
-        ros2 pkg list 2>/dev/null | grep -q "^${pkg}$" && \
-            echo -e "  ${GREEN}✓ $pkg${NC}" || \
-            echo -e "  ${RED}✗ $pkg — install: sudo apt install ros-humble-$(echo $pkg | tr '_' '-')${NC}"
-    done
-
-    echo -e "\n${CYAN}Cek rosbag...${NC}"
-    [ -d "$BAG_PATH" ] && \
-        echo -e "  ${GREEN}✓ Bag: $BAG_PATH${NC}" || \
-        echo -e "  ${RED}✗ Bag tidak ditemukan: $BAG_PATH${NC}"
-
-    echo -e "\n${CYAN}Cek topic di bag...${NC}"
-    if [ -d "$BAG_PATH" ]; then
-        ros2 bag info "$BAG_PATH" 2>/dev/null | grep "Topic:" | while read line; do
-            echo -e "  ${CYAN}$line${NC}"
-        done
+# ══════════════════════════════════════════════════════════════════
+# SPAWN TERMINAL
+# ══════════════════════════════════════════════════════════════════
+spawn_terminal() {
+    local title="$1"
+    local cmd="$2"
+    if command -v gnome-terminal &>/dev/null; then
+        gnome-terminal --title="$title" -- bash -c "$cmd; exec bash" &
+    elif command -v xterm &>/dev/null; then
+        xterm -title "$title" -e "bash -c '$cmd; exec bash'" &
+    else
+        echo -e "${RED}✗ gnome-terminal dan xterm tidak ditemukan${NC}"
+        echo -e "${YELLOW}  Jalankan manual: $cmd${NC}"
     fi
 }
 
-launch_all() {
-    print_banner
+# ══════════════════════════════════════════════════════════════════
+# LAUNCH LIVE
+# ══════════════════════════════════════════════════════════════════
+launch_live() {
+    local localize="$1"
+    local capture="$2"
 
-    echo -e "${CYAN}Konfigurasi:${NC}"
-    echo -e "  Bag       : $BAG_PATH"
-    echo -e "  Rate      : ${RATE}x"
-    echo -e "  Mode      : $MODE"
-    echo -e "  EKF       : $USE_EKF"
-    echo -e "  Odom      : $ODOM_TOPIC"
+    local mode_label
+    [ "$localize" = "true" ] && mode_label="LOCALIZATION" || mode_label="MAPPING"
+
+    print_banner "$mode_label                  "
+    echo -e "${CYAN}Mode    : $mode_label${NC}"
+    echo -e "${CYAN}Odom    : $ODOM_TOPIC${NC}"
+    echo -e "${CYAN}DB      : $DB_PATH${NC}"
+    [ "$capture" = "true" ] && echo -e "${CYAN}Capture : aktif${NC}"
     echo ""
 
-    [ ! -d "$BAG_PATH" ] && \
-        echo -e "${RED}✗ Bag tidak ditemukan: $BAG_PATH${NC}" && exit 1
-
-    setup
-
-    [ -z "$ROS_DISTRO" ]                       && source /opt/ros/humble/setup.bash
-    [ -f "/root/ws/install/setup.bash" ]        && source /root/ws/install/setup.bash
-
-    if [ "$USE_EKF" = "true" ]; then
-        if ! ros2 pkg list 2>/dev/null | grep -q "^robot_localization$"; then
-            echo -e "${RED}✗ robot_localization tidak ada!${NC}"
-            echo -e "${YELLOW}  Install: sudo apt install ros-humble-robot-localization${NC}"
-            exit 1
-        fi
-        echo -e "${GREEN}✓ EKF aktif — fuse wheel odom + IMU${NC}\n"
-    else
-        echo -e "${CYAN}→ EKF nonaktif — pakai $ODOM_TOPIC langsung dari bag${NC}\n"
+    if ! precheck; then
+        echo -e "${RED}✗ Pre-check gagal. Perbaiki masalah di atas lalu ulangi.${NC}"
+        exit 1
     fi
 
-    cd "$SCRIPT_DIR/launch"
+    # OS buffer untuk UDP LiDAR
+    sudo sysctl -w net.core.rmem_max=33554432 2>/dev/null || true
+    sudo sysctl -w net.core.rmem_default=33554432 2>/dev/null || true
 
-    ros2 launch rtabmap_rosbag.launch.py \
-        bag_path:="$BAG_PATH" \
-        rate:="$RATE" \
-        localization:="$([ "$MODE" = "localize" ] && echo true || echo false)" \
-        use_ekf:="$USE_EKF" \
-        odom_topic:="$ODOM_TOPIC" \
-        rviz:=true
+    # Static TF di background
+    echo -e "${CYAN}→ Static TF (background)...${NC}"
+    source /opt/ros/humble/setup.bash 2>/dev/null
+    [ -f "$ROS_WS/install/setup.bash" ] && source "$ROS_WS/install/setup.bash" 2>/dev/null
+    ros2 launch "$SCRIPT_DIR/launch/live/static_tf_live.launch.py" &
+    TF_PID=$!
+    sleep 1
+
+    # Terminal 1 — RTABMap
+    echo -e "${CYAN}→ Terminal 1: RTABMap...${NC}"
+    spawn_terminal "RTABMap Live ($mode_label)" \
+        "source /opt/ros/humble/setup.bash; \
+         [ -f '$ROS_WS/install/setup.bash' ] && source '$ROS_WS/install/setup.bash'; \
+         ros2 launch '$SCRIPT_DIR/launch/live/rtabmap_live.launch.py' \
+             db_path:='$DB_PATH' \
+             odom_topic:='$ODOM_TOPIC' \
+             localization:=$localize \
+             use_ekf:=false \
+             rviz:=true"
+    sleep 4
+
+    # Terminal 2 — Semantic nodes
+    echo -e "${CYAN}→ Terminal 2: Semantic nodes...${NC}"
+    spawn_terminal "Semantic Nodes" \
+        "source /opt/ros/humble/setup.bash; \
+         [ -f '$ROS_WS/install/setup.bash' ] && source '$ROS_WS/install/setup.bash'; \
+         ros2 launch '$SCRIPT_DIR/launch/semantic_only.launch.py' \
+             model_path:='$MODEL_PATH' \
+             device:=cuda \
+             confidence:=0.5"
+
+    # Terminal 3 — Capture (opsional)
+    if [ "$capture" = "true" ]; then
+        echo -e "${CYAN}→ Terminal 3: Capture visualisasi...${NC}"
+        sleep 8
+        spawn_terminal "Capture" \
+            "source /opt/ros/humble/setup.bash; \
+             [ -f '$ROS_WS/install/setup.bash' ] && source '$ROS_WS/install/setup.bash'; \
+             python3 '$SCRIPT_DIR/capture_semantic_map.py'"
+    fi
+
+    echo -e "\n${GREEN}✓ Semua node launched.${NC}"
+    echo -e "${YELLOW}  Tekan Ctrl+C untuk stop static TF background.${NC}"
+    wait $TF_PID
 }
 
-case "$1" in
-    setup)    setup ;;
-    diagnose) source /opt/ros/humble/setup.bash 2>/dev/null; diagnose ;;
-    help|-h)
+# ══════════════════════════════════════════════════════════════════
+# DIAGNOSE
+# ══════════════════════════════════════════════════════════════════
+diagnose_all() {
+    print_banner "Diagnose                  "
+    source /opt/ros/humble/setup.bash 2>/dev/null
+    [ -f "$ROS_WS/install/setup.bash" ] && source "$ROS_WS/install/setup.bash" 2>/dev/null
+
+    precheck || true
+
+    echo -e "${CYAN}${BOLD}=== Tests ===\n${NC}"
+    for test_file in \
+        "$SCRIPT_DIR/tests/test_cleanup.py" \
+        "$SCRIPT_DIR/tests/test_semantic_nodes.py" \
+        "$SCRIPT_DIR/tests/test_models.py" \
+        "$SCRIPT_DIR/tests/test_topics.py" \
+        "$SCRIPT_DIR/tests/test_tf.py"; do
+        if [ -f "$test_file" ]; then
+            echo -e "${CYAN}→ $(basename $test_file)${NC}"
+            python3 "$test_file" && \
+                echo -e "  ${GREEN}✓ PASS${NC}" || \
+                echo -e "  ${RED}✗ FAIL${NC}"
+            echo ""
+        fi
+    done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+case "$ARG" in
+    ""|mapping)
+        launch_live false false
+        ;;
+    output)
+        launch_live false true
+        ;;
+    localize)
+        launch_live true false
+        ;;
+    diagnose)
+        diagnose_all
+        ;;
+    help|-h|--help)
         echo ""
-        echo -e "${CYAN}Usage: ./run.sh [rate] [mode] [use_ekf] [odom_topic]${NC}"
+        echo -e "${CYAN}Usage: ./run.sh [arg]${NC}"
         echo ""
-        echo "  # Bag baru 2026-04-15 (default — odom/filtered sudah di bag)"
-        echo "  ./run.sh"
-        echo "  ./run.sh 0.3"
-        echo ""
-        echo "  # Localization mode (setelah map sudah ada)"
-        echo "  ./run.sh 0.5 localize"
-        echo ""
-        echo "  # Bag lama (EKF dijalankan live)"
-        echo "  ./run.sh 0.5 mapping true /odometry/filtered"
-        echo ""
-        echo "  ./run.sh setup     Setup OS buffer"
-        echo "  ./run.sh diagnose  Cek package dan bag"
+        echo "  ./run.sh              live mode, mapping + semantic"
+        echo "  ./run.sh output       live + capture visualisasi"
+        echo "  ./run.sh localize     live mode, localization"
+        echo "  ./run.sh diagnose     pre-check + tests, tanpa launch"
         echo ""
         ;;
-    *)        launch_all ;;
+    *)
+        echo -e "${RED}✗ Argumen tidak dikenal: $ARG${NC}"
+        echo "Usage: ./run.sh [output | localize | diagnose | help]"
+        exit 1
+        ;;
 esac
